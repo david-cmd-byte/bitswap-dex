@@ -110,3 +110,131 @@
     (ok (var-set fee-to-address new-fee-address))
   )
 )
+
+;; --- Pool Management Functions ---
+
+;; Create a new liquidity pool
+(define-public (create-pool 
+    (token-a-contract <ft-trait>) 
+    (token-b-contract <ft-trait>)
+  )
+  (let (
+    (token-a (contract-of token-a-contract))
+    (token-b (contract-of token-b-contract))
+    (pool-id (var-get next-pool-id))
+  )
+    ;; Error checks
+    (asserts! (not (is-eq token-a token-b)) err-same-token)
+    (asserts! (is-none (map-get? token-pair-to-pool-id { token-a: token-a, token-b: token-b })) err-pool-exists)
+    (asserts! (is-none (map-get? token-pair-to-pool-id { token-a: token-b, token-b: token-a })) err-pool-exists)
+    
+    ;; Create the pool
+    (map-set pools 
+      { pool-id: pool-id }
+      {
+        token-a: token-a,
+        token-b: token-b,
+        token-a-balance: u0,
+        token-b-balance: u0,
+        total-shares: u0,
+        last-price-cumulative: u0,
+        last-price-timestamp: u0
+      }
+    )
+    
+    ;; Set both directions for token pair lookup
+    (map-set token-pair-to-pool-id 
+      { token-a: token-a, token-b: token-b }
+      { pool-id: pool-id }
+    )
+    
+    (map-set token-pair-to-pool-id 
+      { token-a: token-b, token-b: token-a }
+      { pool-id: pool-id }
+    )
+    
+    ;; Increment pool ID for next pool
+    (var-set next-pool-id (+ pool-id u1))
+    
+    (ok pool-id)
+  )
+)
+
+;; --- Liquidity Provider Functions ---
+
+;; Add liquidity to a pool
+(define-public (add-liquidity
+    (token-a-contract <ft-trait>)
+    (token-b-contract <ft-trait>)
+    (amount-a uint)
+    (amount-b uint)
+    (min-shares uint)
+    (deadline uint)
+  )
+  (let (
+    (token-a (contract-of token-a-contract))
+    (token-b (contract-of token-b-contract))
+    (pool-id-data (map-get? token-pair-to-pool-id { token-a: token-a, token-b: token-b }))
+    (block-height (unwrap-panic (get-block-info? height u0)))
+  )
+    ;; Error checks
+    (asserts! (> amount-a u0) err-zero-amount)
+    (asserts! (> amount-b u0) err-zero-amount)
+    (asserts! (>= block-height deadline) err-deadline-passed)
+    (asserts! (is-some pool-id-data) err-pool-not-found)
+    
+    (let (
+      (pool-id (get pool-id (unwrap-panic pool-id-data)))
+      (pool (unwrap-panic (map-get? pools { pool-id: pool-id })))
+      (token-a-balance (get token-a-balance pool))
+      (token-b-balance (get token-b-balance pool))
+      (total-shares (get total-shares pool))
+      (shares-to-mint uint)
+    )
+      ;; Calculate shares to mint
+      (if (is-eq total-shares u0)
+        ;; First liquidity provision - use geometric mean of amounts as initial shares
+        (set shares-to-mint (sqrti (* amount-a amount-b)))
+        ;; Existing liquidity - calculate proportional shares
+        (set shares-to-mint (min
+          (/ (* amount-a total-shares) token-a-balance)
+          (/ (* amount-b total-shares) token-b-balance)
+        ))
+      )
+      
+      ;; Check minimum shares requirement
+      (asserts! (>= shares-to-mint min-shares) err-slippage-too-high)
+      
+      ;; Transfer tokens to the contract
+      (try! (contract-call? token-a-contract transfer amount-a tx-sender (as-contract tx-sender) none))
+      (try! (contract-call? token-b-contract transfer amount-b tx-sender (as-contract tx-sender) none))
+      
+      ;; Update pool balances
+      (map-set pools
+        { pool-id: pool-id }
+        {
+          token-a: token-a,
+          token-b: token-b,
+          token-a-balance: (+ token-a-balance amount-a),
+          token-b-balance: (+ token-b-balance amount-b),
+          total-shares: (+ total-shares shares-to-mint),
+          last-price-cumulative: (get last-price-cumulative pool),
+          last-price-timestamp: (get last-price-timestamp pool)
+        }
+      )
+      
+      ;; Update provider shares
+      (let (
+        (provider-current-shares (default-to { shares: u0 } 
+          (map-get? provider-shares { pool-id: pool-id, provider: tx-sender })))
+      )
+        (map-set provider-shares
+          { pool-id: pool-id, provider: tx-sender }
+          { shares: (+ (get shares provider-current-shares) shares-to-mint) }
+        )
+      )
+      
+      (ok shares-to-mint)
+    )
+  )
+)
