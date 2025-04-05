@@ -316,3 +316,97 @@
     )
   )
 )
+
+;; --- Trading Functions ---
+
+;; Swap token A for token B
+(define-public (swap-exact-tokens-for-tokens
+    (token-a-contract <ft-trait>)
+    (token-b-contract <ft-trait>)
+    (amount-in uint)
+    (min-amount-out uint)
+    (deadline uint)
+  )
+  (let (
+    (token-a (contract-of token-a-contract))
+    (token-b (contract-of token-b-contract))
+    (pool-id-data (map-get? token-pair-to-pool-id { token-a: token-a, token-b: token-b }))
+    (block-height (unwrap-panic (get-block-info? height u0)))
+  )
+    ;; Error checks
+    (asserts! (> amount-in u0) err-zero-amount)
+    (asserts! (>= block-height deadline) err-deadline-passed)
+    (asserts! (is-some pool-id-data) err-pool-not-found)
+    
+    (let (
+      (pool-id (get pool-id (unwrap-panic pool-id-data)))
+      (pool (unwrap-panic (map-get? pools { pool-id: pool-id })))
+      (token-a-balance (get token-a-balance pool))
+      (token-b-balance (get token-b-balance pool))
+      (fee-bps (var-get fee-percentage))
+      (fee-to (var-get fee-to-address))
+      (fee-amount (/ (* amount-in fee-bps) u10000))
+      (amount-in-with-fee (- amount-in fee-amount))
+      (current-time-block (unwrap-panic (get-block-info? time u0)))
+    )
+      ;; Calculate amount out based on constant product formula: x * y = k
+      (asserts! (> token-a-balance u0) err-zero-liquidity)
+      (asserts! (> token-b-balance u0) err-zero-liquidity)
+      
+      (let (
+        (numerator (* amount-in-with-fee token-b-balance))
+        (denominator (+ token-a-balance amount-in-with-fee))
+        (amount-out (/ numerator denominator))
+      )
+        ;; Check if amount out meets minimum requirement
+        (asserts! (>= amount-out min-amount-out) err-slippage-too-high)
+        (asserts! (< amount-out token-b-balance) err-insufficient-liquidity)
+        
+        ;; Update price oracle data
+        (let (
+          (price-cumulative (if (> token-a-balance u0)
+            (+ (get last-price-cumulative pool) 
+              (* (/ (* token-b-balance u1000000) token-a-balance) 
+                (- current-time-block (get last-price-timestamp pool))))
+            u0))
+        )
+          ;; Transfer token A from user to contract
+          (try! (contract-call? token-a-contract transfer amount-in tx-sender (as-contract tx-sender) none))
+          
+          ;; Transfer fee to fee-to address if applicable
+          (if (> fee-amount u0)
+            (as-contract 
+              (try! (contract-call? token-a-contract transfer fee-amount tx-sender fee-to none))
+            )
+            true
+          )
+          
+          ;; Update pool balances
+          (map-set pools
+            { pool-id: pool-id }
+            {
+              token-a: token-a,
+              token-b: token-b,
+              token-a-balance: (+ token-a-balance amount-in-with-fee),
+              token-b-balance: (- token-b-balance amount-out),
+              total-shares: (get total-shares pool),
+              last-price-cumulative: price-cumulative,
+              last-price-timestamp: current-time-block
+            }
+          )
+          
+          ;; Transfer token B to user
+          (as-contract 
+            (try! (contract-call? token-b-contract transfer amount-out tx-sender tx-sender none))
+          )
+          
+          ;; Update protocol metrics
+          (var-set total-volume-usd (+ (var-get total-volume-usd) amount-in))
+          (var-set total-fees-collected (+ (var-get total-fees-collected) fee-amount))
+          
+          (ok { amount-in: amount-in, amount-out: amount-out, fee: fee-amount })
+        )
+      )
+    )
+  )
+)
