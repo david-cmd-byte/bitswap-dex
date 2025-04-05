@@ -410,3 +410,74 @@
     )
   )
 )
+
+;; --- Helper Functions ---
+
+;; Returns the reserves for a specific pool
+(define-read-only (get-reserves (token-a principal) (token-b principal))
+  (let (
+    (pool-id-data (map-get? token-pair-to-pool-id { token-a: token-a, token-b: token-b }))
+  )
+    (if (is-some pool-id-data)
+      (let (
+        (pool-id (get pool-id (unwrap-panic pool-id-data)))
+        (pool (map-get? pools { pool-id: pool-id }))
+      )
+        (if (is-some pool)
+          (let (
+            (pool-data (unwrap-panic pool))
+          )
+            (ok {
+              token-a-balance: (get token-a-balance pool-data),
+              token-b-balance: (get token-b-balance pool-data),
+              total-shares: (get total-shares pool-data)
+            })
+          )
+          err-pool-not-found
+        )
+      )
+      err-pool-not-found
+    )
+  )
+)
+
+;; Returns amount of LP shares for a provider
+(define-read-only (get-provider-shares (pool-id uint) (provider principal))
+  (default-to { shares: u0 } (map-get? provider-shares { pool-id: pool-id, provider: provider }))
+)
+
+;; Calculate amount of token B that would be received for an exact amount of token A
+(define-read-only (quote-exact-tokens-for-tokens 
+    (token-a principal) 
+    (token-b principal) 
+    (amount-in uint)
+  )
+  (let (
+    (pool-id-data (map-get? token-pair-to-pool-id { token-a: token-a, token-b: token-b }))
+  )
+    (if (is-some pool-id-data)
+      (let (
+        (pool-id (get pool-id (unwrap-panic pool-id-data)))
+        (pool (map-get? pools { pool-id: pool-id }))
+      )
+        (if (is-some pool)
+          (let (
+            (pool-data (unwrap-panic pool))
+            (token-a-balance (get token-a-balance (unwrap-panic pool)))
+            (token-b-balance (get token-b-balance (unwrap-panic pool)))
+            (fee-bps (var-get fee-percentage))
+            (fee-amount (/ (* amount-in fee-bps) u10000))
+            (amount-in-with-fee (- amount-in fee-amount))
+          )
+            (if (and (> token-a-balance u0) (> token-b-balance u0))
+              (ok (/ (* amount-in-with-fee token-b-balance) (+ token-a-balance amount-in-with-fee)))
+              err-zero-liquidity
+            )
+          )
+          err-pool-not-found
+        )
+      )
+      err-pool-not-found
+    )
+  )
+)
