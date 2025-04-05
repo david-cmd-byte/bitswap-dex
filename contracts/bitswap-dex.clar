@@ -238,3 +238,81 @@
     )
   )
 )
+
+;; Remove liquidity from a pool
+(define-public (remove-liquidity
+    (token-a-contract <ft-trait>)
+    (token-b-contract <ft-trait>)
+    (shares uint)
+    (min-amount-a uint)
+    (min-amount-b uint)
+    (deadline uint)
+  )
+  (let (
+    (token-a (contract-of token-a-contract))
+    (token-b (contract-of token-b-contract))
+    (pool-id-data (map-get? token-pair-to-pool-id { token-a: token-a, token-b: token-b }))
+    (block-height (unwrap-panic (get-block-info? height u0)))
+  )
+    ;; Error checks
+    (asserts! (> shares u0) err-zero-shares)
+    (asserts! (>= block-height deadline) err-deadline-passed)
+    (asserts! (is-some pool-id-data) err-pool-not-found)
+    
+    (let (
+      (pool-id (get pool-id (unwrap-panic pool-id-data)))
+      (pool (unwrap-panic (map-get? pools { pool-id: pool-id })))
+      (provider-share-data (map-get? provider-shares { pool-id: pool-id, provider: tx-sender }))
+    )
+      ;; Error checks
+      (asserts! (is-some provider-share-data) err-not-token-owner)
+      
+      (let (
+        (provider-shares-amount (get shares (unwrap-panic provider-share-data)))
+        (token-a-balance (get token-a-balance pool))
+        (token-b-balance (get token-b-balance pool))
+        (total-shares (get total-shares pool))
+        (token-a-amount (/ (* token-a-balance shares) total-shares))
+        (token-b-amount (/ (* token-b-balance shares) total-shares))
+      )
+        ;; Error checks
+        (asserts! (>= provider-shares-amount shares) err-insufficient-balance)
+        (asserts! (>= token-a-amount min-amount-a) err-slippage-too-high)
+        (asserts! (>= token-b-amount min-amount-b) err-slippage-too-high)
+        
+        ;; Update provider shares
+        (if (is-eq provider-shares-amount shares)
+          (map-delete provider-shares { pool-id: pool-id, provider: tx-sender })
+          (map-set provider-shares
+            { pool-id: pool-id, provider: tx-sender }
+            { shares: (- provider-shares-amount shares) }
+          )
+        )
+        
+        ;; Update pool balances
+        (map-set pools
+          { pool-id: pool-id }
+          {
+            token-a: token-a,
+            token-b: token-b,
+            token-a-balance: (- token-a-balance token-a-amount),
+            token-b-balance: (- token-b-balance token-b-amount),
+            total-shares: (- total-shares shares),
+            last-price-cumulative: (get last-price-cumulative pool),
+            last-price-timestamp: (get last-price-timestamp pool)
+          }
+        )
+        
+        ;; Transfer tokens to the provider
+        (as-contract 
+          (begin
+            (try! (contract-call? token-a-contract transfer token-a-amount tx-sender tx-sender none))
+            (try! (contract-call? token-b-contract transfer token-b-amount tx-sender tx-sender none))
+          )
+        )
+        
+        (ok { token-a-amount: token-a-amount, token-b-amount: token-b-amount })
+      )
+    )
+  )
+)
