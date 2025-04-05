@@ -481,3 +481,55 @@
     )
   )
 )
+
+;; Calculate price of token-a in terms of token-b (how much token-b per token-a)
+(define-read-only (get-price (token-a principal) (token-b principal))
+  (let (
+    (pool-id-data (map-get? token-pair-to-pool-id { token-a: token-a, token-b: token-b }))
+  )
+    (if (is-some pool-id-data)
+      (let (
+        (pool-id (get pool-id (unwrap-panic pool-id-data)))
+        (pool (map-get? pools { pool-id: pool-id }))
+      )
+        (if (is-some pool)
+          (let (
+            (token-a-balance (get token-a-balance (unwrap-panic pool)))
+            (token-b-balance (get token-b-balance (unwrap-panic pool)))
+          )
+            (if (> token-a-balance u0)
+              (ok (/ (* token-b-balance u1000000) token-a-balance))  ;; Scaled by 10^6 for precision
+              err-divide-by-zero
+            )
+          )
+          err-pool-not-found
+        )
+      )
+      err-pool-not-found
+    )
+  )
+)
+
+;; Get pool information by ID
+(define-read-only (get-pool-by-id (pool-id uint))
+  (map-get? pools { pool-id: pool-id })
+)
+
+;; Get all protocol metrics
+(define-read-only (get-protocol-metrics)
+  {
+    total-volume-usd: (var-get total-volume-usd),
+    total-fees-collected: (var-get total-fees-collected),
+    total-unique-providers: (var-get total-unique-providers),
+    fee-percentage: (var-get fee-percentage),
+    fee-to-address: (var-get fee-to-address),
+    total-pools: (- (var-get next-pool-id) u1)
+  }
+)
+
+(define-private (abs-diff (a uint) (b uint))
+  (if (> a b)
+    (- a b)
+    (- b a)
+  )
+)
